@@ -27,12 +27,7 @@ app = FastAPI(lifespan=lifespan)
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://eg23.net",
-        "https://www.eg23.net",
-        "http://localhost:3000",  # local dev
-        "http://localhost:5173",  # vite dev
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
