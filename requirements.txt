@@ -1,0 +1,12 @@
+fastapi==0.115.5
+uvicorn==0.32.1
+anthropic==0.39.0
+openai==1.54.5
+google-auth==2.36.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.154.0
+notion-client==2.2.1
+twilio==9.3.7
+supabase==2.10.0
+python-multipart==0.0.12
+requests==2.32.3
