@@ -8,6 +8,7 @@ from sms import router as sms_router
 from n8n_webhook import router as n8n_router
 from retell_ws import router as retell_router
 from web_chat import router as chat_router
+from knowledge_upload import router as knowledge_router
 from gmail_poller import start_poller
 from reminder_poller import start_reminder_poller
 
@@ -23,7 +24,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# CORS — allow eg23.net frontend to call the API
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
@@ -37,6 +37,7 @@ app.include_router(sms_router, prefix="/sms")
 app.include_router(n8n_router, prefix="/n8n")
 app.include_router(retell_router)
 app.include_router(chat_router, prefix="/chat")
+app.include_router(knowledge_router, prefix="/knowledge")
 
 
 @app.get("/health")

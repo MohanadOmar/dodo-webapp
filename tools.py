@@ -12,7 +12,7 @@ from twilio.rest import Client as TwilioClient
 from supabase import create_client
 from openai import OpenAI
 
-# ─── Clients ────────────────────────────────────────────────────────────────
+# ─── Constants ───────────────────────────────────────────────────────────────
 
 NOTION_DATABASE_ID = "17e3ff1d-c591-458f-9bf5-fb6d3448e130"
 TWILIO_FROM = "+18663288127"
@@ -20,7 +20,79 @@ MOHANAD_PHONE = "+12107219295"
 CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "mohanadomark@gmail.com")
 
 
-def get_google_creds():
+class IntegrationNotConnected(Exception):
+    def __init__(self, integration: str):
+        self.integration = integration
+        labels = {
+            "gmail": "Gmail",
+            "google_calendar": "Google Calendar",
+            "google_contacts": "Google Contacts",
+            "google_docs": "Google Docs",
+            "google_sheets": "Google Sheets",
+            "notion": "Notion",
+        }
+        label = labels.get(integration, integration)
+        super().__init__(f"NOT_CONNECTED:{integration}:{label}")
+
+
+# ─── Base clients ─────────────────────────────────────────────────────────────
+
+def get_supabase():
+    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+
+def get_openai():
+    return OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+def get_twilio():
+    return TwilioClient(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
+
+
+# ─── Client profile helpers ───────────────────────────────────────────────────
+
+def get_client_phone(user_id: str) -> str | None:
+    """Get a client's phone number from client_profiles. Returns None if not set."""
+    try:
+        result = get_supabase().table("client_profiles").select("phone_number").eq("user_id", user_id).limit(1).execute()
+        if result.data:
+            return result.data[0].get("phone_number")
+    except Exception:
+        pass
+    return None
+
+
+def get_client_timezone(user_id: str) -> str:
+    """Get a client's timezone. Defaults to America/Chicago."""
+    try:
+        result = get_supabase().table("client_profiles").select("timezone").eq("user_id", user_id).limit(1).execute()
+        if result.data:
+            return result.data[0].get("timezone") or "America/Chicago"
+    except Exception:
+        pass
+    return "America/Chicago"
+
+
+# ─── Connection helpers ───────────────────────────────────────────────────────
+
+def _get_client_connection(user_id: str, integration: str) -> dict:
+    if user_id is None:
+        return {"mode": "env"}
+    result = (
+        get_supabase().table("client_connections")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("integration", integration)
+        .eq("status", "connected")
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        raise IntegrationNotConnected(integration)
+    return result.data[0]
+
+
+# ─── Google credentials ───────────────────────────────────────────────────────
+
+def _build_creds_from_env():
     creds = Credentials(
         token=None,
         refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
@@ -40,55 +112,80 @@ def get_google_creds():
     return creds
 
 
-def get_gmail():
-    return build("gmail", "v1", credentials=get_google_creds())
+def get_google_creds_for(user_id: str, integration: str):
+    if user_id is None:
+        return _build_creds_from_env()
+    row = _get_client_connection(user_id, integration)
+    if row.get("mode") == "env":
+        return _build_creds_from_env()
+    refresh_token = row.get("refresh_token")
+    if not refresh_token:
+        raise IntegrationNotConnected(integration)
+    creds = Credentials(
+        token=row.get("access_token"),
+        refresh_token=refresh_token,
+        client_id=os.environ["GOOGLE_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=[
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/contacts",
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+    creds.refresh(Request())
+    try:
+        get_supabase().table("client_connections").update(
+            {"access_token": creds.token}
+        ).eq("user_id", user_id).eq("integration", integration).execute()
+    except Exception:
+        pass
+    return creds
 
 
-def get_calendar():
-    return build("calendar", "v3", credentials=get_google_creds())
+def get_notion_client(user_id: str = None):
+    if user_id is None:
+        return NotionClient(auth=os.environ["NOTION_API_KEY"])
+    row = _get_client_connection(user_id, "notion")
+    if row.get("mode") == "env":
+        return NotionClient(auth=os.environ["NOTION_API_KEY"])
+    token = row.get("access_token") or row.get("refresh_token")
+    if not token:
+        raise IntegrationNotConnected("notion")
+    return NotionClient(auth=token)
 
 
-def get_contacts():
-    return build("people", "v1", credentials=get_google_creds())
+# ─── Service builders ─────────────────────────────────────────────────────────
+
+def get_gmail(user_id=None):
+    return build("gmail", "v1", credentials=get_google_creds_for(user_id, "gmail"))
+
+def get_calendar(user_id=None):
+    return build("calendar", "v3", credentials=get_google_creds_for(user_id, "google_calendar"))
+
+def get_contacts(user_id=None):
+    return build("people", "v1", credentials=get_google_creds_for(user_id, "google_contacts"))
+
+def get_docs(user_id=None):
+    return build("docs", "v1", credentials=get_google_creds_for(user_id, "google_docs"))
+
+def get_sheets(user_id=None):
+    return build("sheets", "v4", credentials=get_google_creds_for(user_id, "google_sheets"))
+
+def get_drive(user_id=None):
+    return build("drive", "v3", credentials=get_google_creds_for(user_id, "google_docs"))
 
 
-def get_docs():
-    return build("docs", "v1", credentials=get_google_creds())
+# ─── Gmail ────────────────────────────────────────────────────────────────────
 
-
-def get_sheets():
-    return build("sheets", "v4", credentials=get_google_creds())
-
-
-def get_drive():
-    return build("drive", "v3", credentials=get_google_creds())
-
-
-def get_notion():
-    return NotionClient(auth=os.environ["NOTION_API_KEY"])
-
-
-def get_twilio():
-    return TwilioClient(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
-
-
-def get_supabase():
-    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
-
-
-def get_openai():
-    return OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-
-
-# ─── Gmail ──────────────────────────────────────────────────────────────────
-
-def get_emails(max_results: int = 5, query: str = "is:unread") -> list:
-    service = get_gmail()
+def get_emails(max_results: int = 5, query: str = "is:unread", user_id: str = None) -> list:
+    service = get_gmail(user_id)
     result = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
-    messages = result.get("messages", [])
-
     emails = []
-    for msg in messages:
+    for msg in result.get("messages", []):
         detail = service.users().messages().get(
             userId="me", id=msg["id"], format="metadata",
             metadataHeaders=["From", "Subject", "Date"]
@@ -115,35 +212,31 @@ def _make_raw(to: str, subject: str, body: str, reply_headers: dict = None) -> s
     return base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
 
-def create_draft(to: str, subject: str, body: str) -> dict:
-    service = get_gmail()
+def create_draft(to: str, subject: str, body: str, user_id: str = None) -> dict:
+    service = get_gmail(user_id)
     raw = _make_raw(to, subject, body)
-    draft = service.users().drafts().create(
-        userId="me", body={"message": {"raw": raw}}
-    ).execute()
+    draft = service.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
     return {"draft_id": draft["id"]}
 
 
-def send_email(to: str, subject: str, body: str) -> dict:
-    service = get_gmail()
+def send_email(to: str, subject: str, body: str, user_id: str = None) -> dict:
+    service = get_gmail(user_id)
     raw = _make_raw(to, subject, body)
     msg = service.users().messages().send(userId="me", body={"raw": raw}).execute()
     return {"message_id": msg["id"]}
 
 
-def reply_to_email(message_id: str, body: str) -> dict:
-    service = get_gmail()
+def reply_to_email(message_id: str, body: str, user_id: str = None) -> dict:
+    service = get_gmail(user_id)
     detail = service.users().messages().get(
         userId="me", id=message_id, format="metadata",
         metadataHeaders=["From", "Subject", "Message-ID", "References"]
     ).execute()
     headers = {h["name"]: h["value"] for h in detail["payload"]["headers"]}
     thread_id = detail["threadId"]
-
     subject = headers.get("Subject", "")
     if not subject.startswith("Re:"):
         subject = f"Re: {subject}"
-
     raw = _make_raw(
         to=headers.get("From", ""),
         subject=subject,
@@ -159,8 +252,8 @@ def reply_to_email(message_id: str, body: str) -> dict:
     return {"message_id": msg["id"]}
 
 
-def add_label(message_id: str, label_name: str) -> dict:
-    service = get_gmail()
+def add_label(message_id: str, label_name: str, user_id: str = None) -> dict:
+    service = get_gmail(user_id)
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
     match = next((l for l in labels if l["name"].lower() == label_name.lower()), None)
     if not match:
@@ -171,23 +264,21 @@ def add_label(message_id: str, label_name: str) -> dict:
     return {"success": True, "label": label_name}
 
 
-# ─── Google Calendar ─────────────────────────────────────────────────────────
+# ─── Google Calendar ──────────────────────────────────────────────────────────
 
-def get_calendar_events(time_min: str = None, time_max: str = None, max_results: int = 20) -> list:
+def get_calendar_events(time_min: str = None, time_max: str = None, max_results: int = 20, user_id: str = None) -> list:
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
-    service = get_calendar()
-    now = datetime.now(ZoneInfo("America/Chicago"))
+    service = get_calendar(user_id)
+    tz = get_client_timezone(user_id) if user_id else "America/Chicago"
+    now = datetime.now(ZoneInfo(tz))
     start = time_min or now.isoformat()
     end = time_max or (now + timedelta(days=7)).isoformat()
-
     result = service.events().list(
-        calendarId=CALENDAR_ID,
+        calendarId="primary" if user_id else CALENDAR_ID,
         timeMin=start, timeMax=end,
-        maxResults=max_results,
-        singleEvents=True, orderBy="startTime"
+        maxResults=max_results, singleEvents=True, orderBy="startTime"
     ).execute()
-
     return [
         {
             "id": e["id"],
@@ -201,52 +292,41 @@ def get_calendar_events(time_min: str = None, time_max: str = None, max_results:
     ]
 
 
-def create_calendar_event(title: str, start: str, end: str = None, description: str = "", location: str = "") -> dict:
+def create_calendar_event(title: str, start: str, end: str = None, description: str = "", location: str = "", user_id: str = None) -> dict:
     from datetime import datetime, timedelta
-    service = get_calendar()
+    service = get_calendar(user_id)
+    tz = get_client_timezone(user_id) if user_id else "America/Chicago"
+    cal_id = "primary" if user_id else CALENDAR_ID
     if not end:
         end = (datetime.fromisoformat(start) + timedelta(minutes=30)).isoformat()
-
-    # Conflict check — query freebusy for the exact requested window
     freebusy = service.freebusy().query(body={
-        "timeMin": start,
-        "timeMax": end,
-        "timeZone": "America/Chicago",
-        "items": [{"id": CALENDAR_ID}],
+        "timeMin": start, "timeMax": end,
+        "timeZone": tz, "items": [{"id": cal_id}],
     }).execute()
-
-    busy_slots = freebusy["calendars"][CALENDAR_ID].get("busy", [])
+    busy_slots = freebusy["calendars"][cal_id].get("busy", [])
     if busy_slots:
-        # There's a conflict — fetch event titles for context
         conflicts = service.events().list(
-            calendarId=CALENDAR_ID,
-            timeMin=start,
-            timeMax=end,
-            singleEvents=True,
-            orderBy="startTime",
+            calendarId=cal_id, timeMin=start, timeMax=end,
+            singleEvents=True, orderBy="startTime",
         ).execute().get("items", [])
-
-        conflict_list = [
-            {
-                "title": e.get("summary", "Untitled"),
-                "start": e["start"].get("dateTime", e["start"].get("date")),
-                "end": e["end"].get("dateTime", e["end"].get("date")),
-            }
-            for e in conflicts
-        ]
         return {
             "conflict": True,
             "message": f"Cannot create '{title}' — conflicts with existing event(s).",
-            "existing_events": conflict_list,
+            "existing_events": [
+                {
+                    "title": e.get("summary", "Untitled"),
+                    "start": e["start"].get("dateTime", e["start"].get("date")),
+                    "end": e["end"].get("dateTime", e["end"].get("date")),
+                }
+                for e in conflicts
+            ],
         }
-
-    # No conflict, safe to create
     event = service.events().insert(
-        calendarId=CALENDAR_ID,
+        calendarId=cal_id,
         body={
             "summary": title,
-            "start": {"dateTime": start, "timeZone": "America/Chicago"},
-            "end": {"dateTime": end, "timeZone": "America/Chicago"},
+            "start": {"dateTime": start, "timeZone": tz},
+            "end": {"dateTime": end, "timeZone": tz},
             "description": description,
             "location": location,
         },
@@ -254,14 +334,11 @@ def create_calendar_event(title: str, start: str, end: str = None, description: 
     return {"event_id": event["id"], "link": event.get("htmlLink", ""), "conflict": False}
 
 
-# ─── Notion ──────────────────────────────────────────────────────────────────
+# ─── Notion ───────────────────────────────────────────────────────────────────
 
-def get_notion_tasks(return_all: bool = True) -> list:
-    notion = get_notion()
-    result = notion.databases.query(
-        database_id=NOTION_DATABASE_ID,
-        page_size=100 if return_all else 10
-    )
+def get_notion_tasks(return_all: bool = True, user_id: str = None) -> list:
+    notion = get_notion_client(user_id)
+    result = notion.databases.query(database_id=NOTION_DATABASE_ID, page_size=100 if return_all else 10)
     tasks = []
     for page in result["results"]:
         props = page["properties"]
@@ -278,8 +355,8 @@ def get_notion_tasks(return_all: bool = True) -> list:
     return tasks
 
 
-def update_notion_task(page_id: str, status: str = None, title: str = None) -> dict:
-    notion = get_notion()
+def update_notion_task(page_id: str, status: str = None, title: str = None, user_id: str = None) -> dict:
+    notion = get_notion_client(user_id)
     properties = {}
     if status:
         properties["Status"] = {"select": {"name": status}}
@@ -289,8 +366,8 @@ def update_notion_task(page_id: str, status: str = None, title: str = None) -> d
     return {"success": True, "page_id": page_id}
 
 
-def create_notion_task(title: str) -> dict:
-    notion = get_notion()
+def create_notion_task(title: str, user_id: str = None) -> dict:
+    notion = get_notion_client(user_id)
     page = notion.pages.create(
         parent={"database_id": NOTION_DATABASE_ID},
         properties={"Task": {"title": [{"text": {"content": title}}]}},
@@ -298,7 +375,7 @@ def create_notion_task(title: str) -> dict:
     return {"page_id": page["id"], "title": title}
 
 
-# ─── Twilio ──────────────────────────────────────────────────────────────────
+# ─── SMS ──────────────────────────────────────────────────────────────────────
 
 def send_sms(to: str, message: str) -> dict:
     client = get_twilio()
@@ -307,48 +384,105 @@ def send_sms(to: str, message: str) -> dict:
 
 
 def send_sms_to_mohanad(message: str) -> dict:
+    """Personal SMS to Mohanad — used by SMS/voice Dodo only (user_id=None)."""
     return send_sms(to=MOHANAD_PHONE, message=message)
 
 
-# ─── Supabase Knowledge Base ─────────────────────────────────────────────────
+def send_sms_to_client(message: str, user_id: str) -> dict:
+    """Send SMS to a client using their phone number from client_profiles."""
+    phone = get_client_phone(user_id)
+    if not phone:
+        return {"error": "No phone number on file for this client. They need to add it in their profile."}
+    return send_sms(to=phone, message=message)
 
-def search_knowledge_base(query: str) -> list:
+
+# ─── Knowledge Base (per-client) ──────────────────────────────────────────────
+
+def search_knowledge_base(query: str, user_id: str = None) -> list:
+    """
+    Search the knowledge base. If user_id is set, only searches that
+    client's documents. Falls back to EG23's global docs if no user_id.
+    """
     client = get_openai()
     supabase = get_supabase()
 
-    embedding_res = client.embeddings.create(
-        model="text-embedding-3-small", input=query
-    )
+    embedding_res = client.embeddings.create(model="text-embedding-3-small", input=query)
     embedding = embedding_res.data[0].embedding
+
+    # Pass user_id as filter so the RPC only returns their documents
+    filter_obj = {}
+    if user_id:
+        filter_obj["user_id"] = user_id
 
     result = supabase.rpc("match_documents", {
         "query_embedding": embedding,
         "match_count": 5,
-        "filter": {},
+        "filter": filter_obj,
     }).execute()
 
     return result.data or []
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# GOOGLE CONTACTS
-# ════════════════════════════════════════════════════════════════════════════
+def upload_document_chunks(chunks: list[dict], user_id: str, source_name: str) -> dict:
+    """
+    Store pre-embedded document chunks in Supabase.
+    Each chunk: {"content": str, "embedding": list[float]}
+    Called by the /knowledge/upload endpoint.
+    """
+    supabase = get_supabase()
+    rows = [
+        {
+            "content": chunk["content"],
+            "embedding": chunk["embedding"],
+            "metadata": {"source": source_name},
+            "user_id": user_id,
+            "source_name": source_name,
+        }
+        for chunk in chunks
+    ]
+    result = supabase.table("documents").insert(rows).execute()
+    return {"uploaded": len(rows), "source": source_name}
 
-def search_contacts(query: str, max_results: int = 5) -> list:
-    """Search the user's Google Contacts by name, email, or phone."""
-    service = get_contacts()
-    # Trigger the warmup cache for searches (recommended by Google)
+
+def list_client_documents(user_id: str) -> list:
+    """List documents uploaded by a client (distinct source names)."""
+    supabase = get_supabase()
+    result = (
+        supabase.table("documents")
+        .select("id, source_name, created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    # Deduplicate by source_name
+    seen = {}
+    for row in (result.data or []):
+        name = row.get("source_name", "Unknown")
+        if name not in seen:
+            seen[name] = {"source_name": name, "created_at": row.get("created_at")}
+    return list(seen.values())
+
+
+def delete_client_document(source_name: str, user_id: str) -> dict:
+    """Delete all chunks for a given source document."""
+    supabase = get_supabase()
+    supabase.table("documents").delete().eq("user_id", user_id).eq("source_name", source_name).execute()
+    return {"deleted": source_name}
+
+
+# ─── Google Contacts ──────────────────────────────────────────────────────────
+
+def search_contacts(query: str, max_results: int = 5, user_id: str = None) -> list:
+    service = get_contacts(user_id)
     try:
         service.people().searchContacts(query="", readMask="names").execute()
     except Exception:
         pass
-
     result = service.people().searchContacts(
         query=query,
         readMask="names,emailAddresses,phoneNumbers,organizations",
         pageSize=max_results,
     ).execute()
-
     contacts = []
     for r in result.get("results", []):
         person = r.get("person", {})
@@ -356,7 +490,6 @@ def search_contacts(query: str, max_results: int = 5) -> list:
         emails = person.get("emailAddresses", [])
         phones = person.get("phoneNumbers", [])
         orgs = person.get("organizations", [])
-
         contacts.append({
             "resource_name": person.get("resourceName", ""),
             "name": names[0].get("displayName", "") if names else "",
@@ -367,9 +500,8 @@ def search_contacts(query: str, max_results: int = 5) -> list:
     return contacts
 
 
-def create_contact(name: str, email: str = None, phone: str = None, company: str = None) -> dict:
-    """Create a new contact."""
-    service = get_contacts()
+def create_contact(name: str, email: str = None, phone: str = None, company: str = None, user_id: str = None) -> dict:
+    service = get_contacts(user_id)
     body = {"names": [{"givenName": name}]}
     if email:
         body["emailAddresses"] = [{"value": email}]
@@ -377,402 +509,188 @@ def create_contact(name: str, email: str = None, phone: str = None, company: str
         body["phoneNumbers"] = [{"value": phone}]
     if company:
         body["organizations"] = [{"name": company}]
-
     person = service.people().createContact(body=body).execute()
     return {"resource_name": person["resourceName"], "name": name}
 
 
-def update_contact(resource_name: str, email: str = None, phone: str = None) -> dict:
-    """Update an existing contact's email or phone. Use search_contacts first to get the resource_name."""
-    service = get_contacts()
-
-    # Need to fetch current state first
-    person = service.people().get(
-        resourceName=resource_name,
-        personFields="names,emailAddresses,phoneNumbers"
-    ).execute()
-
+def update_contact(resource_name: str, email: str = None, phone: str = None, user_id: str = None) -> dict:
+    service = get_contacts(user_id)
+    person = service.people().get(resourceName=resource_name, personFields="names,emailAddresses,phoneNumbers").execute()
     update_fields = []
     body = {"etag": person["etag"]}
-
     if email:
         body["emailAddresses"] = [{"value": email}]
         update_fields.append("emailAddresses")
     if phone:
         body["phoneNumbers"] = [{"value": phone}]
         update_fields.append("phoneNumbers")
-
     if not update_fields:
         return {"error": "No fields to update"}
-
     updated = service.people().updateContact(
         resourceName=resource_name,
         updatePersonFields=",".join(update_fields),
         body=body,
     ).execute()
-
     return {"success": True, "resource_name": updated["resourceName"]}
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# GOOGLE DOCS
-# ════════════════════════════════════════════════════════════════════════════
+# ─── Google Docs ──────────────────────────────────────────────────────────────
 
-def list_recent_docs(max_results: int = 10, query: str = None) -> list:
-    """List recent Google Docs. Optionally filter by name/keyword."""
-    drive = get_drive()
+def list_recent_docs(max_results: int = 10, query: str = None, user_id: str = None) -> list:
+    drive = get_drive(user_id)
     q = "mimeType='application/vnd.google-apps.document' and trashed=false"
     if query:
         q += f" and name contains '{query}'"
-
-    result = drive.files().list(
-        q=q,
-        orderBy="modifiedTime desc",
-        pageSize=max_results,
-        fields="files(id, name, modifiedTime, webViewLink)",
-    ).execute()
-
-    return [
-        {
-            "id": f["id"],
-            "title": f["name"],
-            "modified": f.get("modifiedTime", ""),
-            "url": f.get("webViewLink", ""),
-        }
-        for f in result.get("files", [])
-    ]
+    result = drive.files().list(q=q, orderBy="modifiedTime desc", pageSize=max_results, fields="files(id, name, modifiedTime, webViewLink)").execute()
+    return [{"id": f["id"], "title": f["name"], "modified": f.get("modifiedTime", ""), "url": f.get("webViewLink", "")} for f in result.get("files", [])]
 
 
-def read_doc(doc_id: str) -> dict:
-    """Read the full text content of a Google Doc."""
-    docs = get_docs()
+def read_doc(doc_id: str, user_id: str = None) -> dict:
+    docs = get_docs(user_id)
     doc = docs.documents().get(documentId=doc_id).execute()
-
-    # Extract plain text from the doc structure
     text_parts = []
     for elem in doc.get("body", {}).get("content", []):
         para = elem.get("paragraph")
         if not para:
             continue
         for run in para.get("elements", []):
-            text_run = run.get("textRun", {})
-            text_parts.append(text_run.get("content", ""))
-
-    return {
-        "id": doc_id,
-        "title": doc.get("title", ""),
-        "content": "".join(text_parts),
-    }
+            text_parts.append(run.get("textRun", {}).get("content", ""))
+    return {"id": doc_id, "title": doc.get("title", ""), "content": "".join(text_parts)}
 
 
-def create_doc(title: str, content: str = "") -> dict:
-    """Create a new Google Doc with optional initial content."""
-    docs = get_docs()
+def create_doc(title: str, content: str = "", user_id: str = None) -> dict:
+    docs = get_docs(user_id)
     doc = docs.documents().create(body={"title": title}).execute()
     doc_id = doc["documentId"]
-
     if content:
-        docs.documents().batchUpdate(
-            documentId=doc_id,
-            body={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]},
-        ).execute()
-
-    return {
-        "id": doc_id,
-        "title": title,
-        "url": f"https://docs.google.com/document/d/{doc_id}/edit",
-    }
+        docs.documents().batchUpdate(documentId=doc_id, body={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]}).execute()
+    return {"id": doc_id, "title": title, "url": f"https://docs.google.com/document/d/{doc_id}/edit"}
 
 
-def append_to_doc(doc_id: str, text: str) -> dict:
-    """Append text to the end of a Google Doc."""
-    docs = get_docs()
-    # Get the current end index
+def append_to_doc(doc_id: str, text: str, user_id: str = None) -> dict:
+    docs = get_docs(user_id)
     doc = docs.documents().get(documentId=doc_id).execute()
     end_index = doc["body"]["content"][-1]["endIndex"] - 1
-
-    docs.documents().batchUpdate(
-        documentId=doc_id,
-        body={"requests": [{
-            "insertText": {"location": {"index": end_index}, "text": "\n" + text}
-        }]},
-    ).execute()
-
+    docs.documents().batchUpdate(documentId=doc_id, body={"requests": [{"insertText": {"location": {"index": end_index}, "text": "\n" + text}}]}).execute()
     return {"success": True, "doc_id": doc_id}
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# GOOGLE SHEETS
-# ════════════════════════════════════════════════════════════════════════════
+# ─── Google Sheets ────────────────────────────────────────────────────────────
 
-def list_recent_sheets(max_results: int = 10, query: str = None) -> list:
-    """List recent Google Sheets. Optionally filter by name/keyword."""
-    drive = get_drive()
+def list_recent_sheets(max_results: int = 10, query: str = None, user_id: str = None) -> list:
+    drive = get_drive(user_id)
     q = "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
     if query:
         q += f" and name contains '{query}'"
-
-    result = drive.files().list(
-        q=q,
-        orderBy="modifiedTime desc",
-        pageSize=max_results,
-        fields="files(id, name, modifiedTime, webViewLink)",
-    ).execute()
-
-    return [
-        {
-            "id": f["id"],
-            "title": f["name"],
-            "modified": f.get("modifiedTime", ""),
-            "url": f.get("webViewLink", ""),
-        }
-        for f in result.get("files", [])
-    ]
+    result = drive.files().list(q=q, orderBy="modifiedTime desc", pageSize=max_results, fields="files(id, name, modifiedTime, webViewLink)").execute()
+    return [{"id": f["id"], "title": f["name"], "modified": f.get("modifiedTime", ""), "url": f.get("webViewLink", "")} for f in result.get("files", [])]
 
 
-def read_sheet(sheet_id: str, range_name: str = "A1:Z100") -> dict:
-    """Read a range from a Google Sheet. Default range covers most small sheets."""
-    sheets = get_sheets()
-
-    # If no specific range, try to read the first sheet's used range
+def read_sheet(sheet_id: str, range_name: str = "A1:Z100", user_id: str = None) -> dict:
+    sheets = get_sheets(user_id)
     if range_name == "A1:Z100":
         meta = sheets.spreadsheets().get(spreadsheetId=sheet_id).execute()
         first_sheet_name = meta["sheets"][0]["properties"]["title"]
         range_name = f"{first_sheet_name}!A1:Z100"
-
-    result = sheets.spreadsheets().values().get(
-        spreadsheetId=sheet_id, range=range_name
-    ).execute()
-
+    result = sheets.spreadsheets().values().get(spreadsheetId=sheet_id, range=range_name).execute()
     values = result.get("values", [])
     if not values:
         return {"sheet_id": sheet_id, "rows": [], "row_count": 0}
-
-    # First row is usually headers
-    headers = values[0] if values else []
-    data_rows = values[1:] if len(values) > 1 else []
-
-    return {
-        "sheet_id": sheet_id,
-        "headers": headers,
-        "rows": data_rows,
-        "row_count": len(data_rows),
-        "range": range_name,
-    }
+    return {"sheet_id": sheet_id, "headers": values[0], "rows": values[1:], "row_count": len(values) - 1, "range": range_name}
 
 
-def create_sheet(title: str, headers: list = None) -> dict:
-    """Create a new Google Sheet with optional headers in row 1."""
-    sheets = get_sheets()
-    body = {"properties": {"title": title}}
-    sheet = sheets.spreadsheets().create(body=body).execute()
+def create_sheet(title: str, headers: list = None, user_id: str = None) -> dict:
+    sheets = get_sheets(user_id)
+    sheet = sheets.spreadsheets().create(body={"properties": {"title": title}}).execute()
     sheet_id = sheet["spreadsheetId"]
-
     if headers:
-        sheets.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range="A1",
-            valueInputOption="USER_ENTERED",
-            body={"values": [headers]},
-        ).execute()
-
-    return {
-        "id": sheet_id,
-        "title": title,
-        "url": f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit",
-    }
+        sheets.spreadsheets().values().update(spreadsheetId=sheet_id, range="A1", valueInputOption="USER_ENTERED", body={"values": [headers]}).execute()
+    return {"id": sheet_id, "title": title, "url": f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"}
 
 
-def append_row(sheet_id: str, values: list, sheet_name: str = None) -> dict:
-    """Append a row of values to a sheet. values should be a list of strings/numbers."""
-    sheets = get_sheets()
-
+def append_row(sheet_id: str, values: list, sheet_name: str = None, user_id: str = None) -> dict:
+    sheets = get_sheets(user_id)
     if not sheet_name:
         meta = sheets.spreadsheets().get(spreadsheetId=sheet_id).execute()
         sheet_name = meta["sheets"][0]["properties"]["title"]
-
-    sheets.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range=f"{sheet_name}!A1",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [values]},
-    ).execute()
-
+    sheets.spreadsheets().values().append(spreadsheetId=sheet_id, range=f"{sheet_name}!A1", valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={"values": [values]}).execute()
     return {"success": True, "sheet_id": sheet_id, "appended": values}
 
 
-def update_cell(sheet_id: str, cell: str, value: str, sheet_name: str = None) -> dict:
-    """Update a single cell. cell is in A1 notation like 'B5'."""
-    sheets = get_sheets()
-
+def update_cell(sheet_id: str, cell: str, value: str, sheet_name: str = None, user_id: str = None) -> dict:
+    sheets = get_sheets(user_id)
     if not sheet_name:
         meta = sheets.spreadsheets().get(spreadsheetId=sheet_id).execute()
         sheet_name = meta["sheets"][0]["properties"]["title"]
-
-    range_name = f"{sheet_name}!{cell}"
-
-    sheets.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=range_name,
-        valueInputOption="USER_ENTERED",
-        body={"values": [[value]]},
-    ).execute()
-
+    sheets.spreadsheets().values().update(spreadsheetId=sheet_id, range=f"{sheet_name}!{cell}", valueInputOption="USER_ENTERED", body={"values": [[value]]}).execute()
     return {"success": True, "sheet_id": sheet_id, "cell": cell, "value": value}
 
 
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# PERPLEXITY — real-time web search
-# ════════════════════════════════════════════════════════════════════════════
+# ─── Perplexity ───────────────────────────────────────────────────────────────
 
 import requests as _requests
 
 def web_search(query: str) -> dict:
-    """Search the web in real-time using Perplexity Sonar.
-
-    Returns a concise answer with source citations.
-    Use this for any question that needs current/real-time information,
-    news, research, facts, pricing, comparisons, or anything
-    outside of Mohanad's own tools (Gmail, Calendar, Notion, etc.).
-    """
     api_key = os.environ.get("PERPLEXITY_API_KEY", "")
     if not api_key:
         return {"error": "PERPLEXITY_API_KEY not set"}
-
     try:
         response = _requests.post(
-            "https://api.perplexity.ai/v1/sonar",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            "https://api.perplexity.ai/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
                 "model": "sonar",
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a research assistant. Provide a concise, factual answer "
-                            "with key details. Keep it under 200 words. Include specific "
-                            "numbers, dates, and names when relevant."
-                        ),
-                    },
+                    {"role": "system", "content": "You are a research assistant. Provide a concise, factual answer with the most important details. Keep it under 300 words. Include specific numbers, dates, and names where relevant."},
                     {"role": "user", "content": query},
                 ],
             },
             timeout=30,
         )
-
         if response.status_code >= 400:
             return {"error": f"Perplexity returned {response.status_code}: {response.text[:200]}"}
-
         data = response.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         citations = data.get("citations", [])
-
         result = {"answer": answer}
         if citations:
-            result["sources"] = citations[:5]  # top 5 sources
-
+            result["sources"] = citations[:5]
         return result
-
     except _requests.Timeout:
         return {"error": "Perplexity search timed out"}
     except Exception as e:
         return {"error": str(e)}
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# PERPLEXITY — Real-time web search via Sonar API
-# ════════════════════════════════════════════════════════════════════════════
+# ─── Reminders ────────────────────────────────────────────────────────────────
 
-def web_search(query: str) -> dict:
-    """Search the web in real-time using Perplexity Sonar.
-
-    Use this for any question that needs current information:
-    news, prices, recent events, company info, regulations, etc.
+def create_reminder(message: str, remind_at: str, user_id: str = None) -> dict:
     """
-    import requests as _req
-
-    api_key = os.environ.get("PERPLEXITY_API_KEY", "")
-    if not api_key:
-        return {"error": "PERPLEXITY_API_KEY not set"}
-
-    try:
-        response = _req.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "sonar",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a research assistant. Provide a concise, factual answer "
-                            "with the most important details. Keep it under 300 words. "
-                            "Include specific numbers, dates, and names where relevant."
-                        ),
-                    },
-                    {"role": "user", "content": query},
-                ],
-            },
-            timeout=30,
-        )
-
-        if response.status_code >= 400:
-            return {"error": f"Perplexity returned {response.status_code}: {response.text[:200]}"}
-
-        data = response.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        citations = data.get("citations", [])
-
-        result = {"answer": answer}
-        if citations:
-            result["sources"] = citations[:5]  # Top 5 sources
-        return result
-
-    except _req.Timeout:
-        return {"error": "Perplexity search timed out"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# REMINDERS (Supabase)
-# ════════════════════════════════════════════════════════════════════════════
-
-def create_reminder(message: str, remind_at: str) -> dict:
-    """Create a timed reminder. remind_at must be ISO 8601 with timezone (e.g. 2026-05-13T18:00:00-05:00)."""
+    Create a reminder. Stores user_id so the reminder poller
+    knows whose phone to send it to.
+    """
     supabase = get_supabase()
     row = supabase.table("reminders").insert({
         "message": message,
         "remind_at": remind_at,
         "sent": False,
+        "user_id": user_id,
     }).execute()
-
     if row.data:
         return {"success": True, "id": row.data[0]["id"], "message": message, "remind_at": remind_at}
     return {"success": False, "error": "Failed to create reminder"}
 
 
-def list_reminders(include_sent: bool = False) -> list:
-    """List upcoming reminders. By default only shows unsent ones."""
+def list_reminders(include_sent: bool = False, user_id: str = None) -> list:
     supabase = get_supabase()
     query = supabase.table("reminders").select("*").order("remind_at")
+    if user_id:
+        query = query.eq("user_id", user_id)
     if not include_sent:
         query = query.eq("sent", False)
-    result = query.execute()
-    return result.data or []
+    return query.execute().data or []
 
 
 def delete_reminder(reminder_id: str) -> dict:
-    """Delete a reminder by ID."""
-    supabase = get_supabase()
-    supabase.table("reminders").delete().eq("id", reminder_id).execute()
+    get_supabase().table("reminders").delete().eq("id", reminder_id).execute()
     return {"success": True, "deleted": reminder_id}
