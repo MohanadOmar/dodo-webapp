@@ -14,6 +14,7 @@ from tools import (
     web_search,
     create_reminder, list_reminders, delete_reminder,
     IntegrationNotConnected,
+    get_supabase,
 )
 from workflow_engine import WORKFLOW_TOOLS, WORKFLOW_FUNCS
 
@@ -54,8 +55,36 @@ TOOLS = [
 
 TOOLS.extend(WORKFLOW_TOOLS)
 
+# In-memory cache of recently-loaded sessions (just an optimization)
 _sessions: dict[str, list] = defaultdict(list)
-MAX_HISTORY = 20
+MAX_HISTORY = 30
+
+
+def _load_history_from_supabase(session_id: str) -> list:
+    """Load full conversation history for this session from Supabase."""
+    try:
+        result = (
+            get_supabase()
+            .table("chat_messages")
+            .select("role, content")
+            .eq("session_id", session_id)
+            .order("created_at", desc=False)
+            .limit(MAX_HISTORY)
+            .execute()
+        )
+        history = []
+        for row in result.data or []:
+            role = row["role"]
+            content = row["content"]
+            if role == "system":
+                # System messages from connection updates get injected as user notes
+                history.append({"role": "user", "content": f"[{content}]"})
+            elif role in ("user", "assistant"):
+                history.append({"role": role, "content": content})
+        return history
+    except Exception as e:
+        print(f"[Agent] Failed to load history: {e}")
+        return []
 
 
 def _make_tool_map(user_id: str) -> dict:
@@ -137,13 +166,28 @@ def run_agent(
     system_prompt: str,
     phone_number: str = None,
     user_id: str = None,
+    session_id: str = None,
     tools: list = None,
 ) -> str:
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    history = _sessions[phone_number] if phone_number else []
 
-    messages = [m for m in history if m.get("role") in ("user", "assistant")]
-    messages.append({"role": "user", "content": user_message})
+    # Web sessions: load history from Supabase. SMS/voice: use in-memory dict.
+    if session_id:
+        if session_id in _sessions:
+            history = _sessions[session_id]
+        else:
+            history = _load_history_from_supabase(session_id)
+            _sessions[session_id] = history
+        # The user's NEW message is not yet in DB at this call (it's saved before run_agent runs in web_chat),
+        # so the most recent DB row IS the current user message. History already has it.
+        messages = list(history)
+        # Make sure the last user message is the one we received
+        if not messages or messages[-1].get("role") != "user":
+            messages.append({"role": "user", "content": user_message})
+    else:
+        history = _sessions[phone_number] if phone_number else []
+        messages = [m for m in history if m.get("role") in ("user", "assistant")]
+        messages.append({"role": "user", "content": user_message})
 
     active_tools_openai = TOOLS if tools is None else tools
     active_tools = _convert_tools_to_anthropic(active_tools_openai) if active_tools_openai else []
@@ -202,7 +246,29 @@ def run_agent(
 
         messages.append({"role": "user", "content": tool_results})
 
-    if phone_number:
+    # Update in-memory cache for web sessions
+    if session_id:
+        # Replace with the clean text-only history (no tool_use blocks, no tool_result blocks)
+        clean_history = []
+        for m in messages:
+            if m.get("role") == "user":
+                content = m.get("content")
+                if isinstance(content, str):
+                    clean_history.append(m)
+                # Skip tool_result-only messages
+            elif m.get("role") == "assistant":
+                content = m.get("content")
+                if isinstance(content, list):
+                    # Extract just the text blocks
+                    text = "\n".join(
+                        b.text for b in content if getattr(b, "type", None) == "text"
+                    ).strip()
+                    if text:
+                        clean_history.append({"role": "assistant", "content": text})
+                elif isinstance(content, str):
+                    clean_history.append(m)
+        _sessions[session_id] = clean_history[-MAX_HISTORY:]
+    elif phone_number:
         session = _sessions[phone_number]
         session.append({"role": "user", "content": user_message})
         session.append({"role": "assistant", "content": final_text})
