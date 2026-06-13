@@ -12,6 +12,8 @@ from twilio.rest import Client as TwilioClient
 from supabase import create_client
 from openai import OpenAI
 
+import messaging as _messaging
+
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 NOTION_DATABASE_ID = "17e3ff1d-c591-458f-9bf5-fb6d3448e130"
@@ -388,53 +390,12 @@ def send_sms_to_mohanad(message: str) -> dict:
     return send_sms(to=MOHANAD_PHONE, message=message)
 
 
-def send_sms_to_client(message: str, user_id: str) -> dict:
-    """Send SMS to a client using their phone number from client_profiles."""
-    phone = get_client_phone(user_id)
-    if not phone:
-        return {"error": "No phone number on file for this client. They need to add it in their profile."}
-    return send_sms(to=phone, message=message)
-
-
-def send_whatsapp(to: str, message: str) -> dict:
-    """Send a WhatsApp message via Whapi."""
-    api_key = os.environ.get("WHAPI_API_KEY", "")
-    phone = to.replace("@s.whatsapp.net", "").replace("@c.us", "").lstrip("+")
-    _requests.post(
-        "https://gate.whapi.cloud/messages/text",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"to": f"{phone}@s.whatsapp.net", "body": message},
-        timeout=15,
-    )
-    return {"success": True, "to": to}
-
-
 def send_message_to_client(message: str, user_id: str) -> dict:
-    """Send a message to a client via their preferred channel (SMS or WhatsApp)."""
-    supabase = get_supabase()
-    result = (
-        supabase.table("client_profiles")
-        .select("messaging_channel, phone_number, whatsapp_number")
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-    if not result.data:
-        return {"error": "No profile found for this client."}
+    """Send a message to a client via their preferred channel (SMS or WhatsApp). Checks their profile automatically."""
+    return _messaging.send_message(user_id=user_id, body=message)
 
-    profile = result.data[0]
-    channel = profile.get("messaging_channel") or "sms"
 
-    if channel == "whatsapp":
-        wa_number = profile.get("whatsapp_number")
-        if not wa_number:
-            return {"error": "No WhatsApp number on file for this client."}
-        return send_whatsapp(to=wa_number, message=message)
-    else:
-        phone = profile.get("phone_number")
-        if not phone:
-            return {"error": "No phone number on file for this client."}
-        return send_sms(to=phone, message=message)
+send_message = send_message_to_client
 
 
 # ─── Knowledge Base (per-client) ──────────────────────────────────────────────

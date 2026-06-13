@@ -6,6 +6,7 @@ from urllib.parse import urlencode, quote
 from fastapi import APIRouter, Request, Response
 from agent import run_agent
 from system_prompts import get_sms_system_prompt
+from messaging import send_message_via_sms  # noqa: F401 — available for outbound use
 
 router = APIRouter()
 

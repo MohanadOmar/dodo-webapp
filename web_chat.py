@@ -61,19 +61,19 @@ def _get_client_about(user_id: str) -> str:
     return ""
 
 
-def _get_client_messaging_channel(user_id: str) -> str:
-    """Get the client's preferred messaging channel. Defaults to 'sms'."""
+def _get_client_communication_method(user_id: str) -> str:
+    """Get the client's preferred communication method. Defaults to 'sms'."""
     try:
         result = (
             get_supabase()
             .table("client_profiles")
-            .select("messaging_channel")
+            .select("communication_method")
             .eq("user_id", user_id)
             .limit(1)
             .execute()
         )
-        if result.data and result.data[0].get("messaging_channel"):
-            return result.data[0]["messaging_channel"]
+        if result.data and result.data[0].get("communication_method"):
+            return result.data[0]["communication_method"]
     except Exception:
         pass
     return "sms"
@@ -173,8 +173,8 @@ async def chat_message(request: Request):
     # Build system prompt with client context
     client_name = _get_client_name(user_id)
     client_about = _get_client_about(user_id)
-    messaging_channel = _get_client_messaging_channel(user_id)
-    system_prompt = get_client_web_system_prompt(client_name, client_about, messaging_channel)
+    communication_method = _get_client_communication_method(user_id)
+    system_prompt = get_client_web_system_prompt(client_name, client_about, communication_method)
 
     # Run the agent with this session as the conversation key
     try:

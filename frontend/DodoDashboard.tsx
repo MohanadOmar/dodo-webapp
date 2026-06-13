@@ -46,9 +46,8 @@ interface Profile {
   nickname: string;
   timezone: string;
   brief_about: string;
-  messaging_channel: "sms" | "whatsapp";
+  communication_method: "sms" | "wp";
   phone_number: string;
-  whatsapp_number: string;
 }
 
 interface Integration {
@@ -331,23 +330,21 @@ function ProfileSection({ userId, toast }: { userId: string; toast: (m: string, 
 // ─── Section 2: Messaging Channel ────────────────────────────────────────────
 
 function MessagingSection({ userId, toast }: { userId: string; toast: (m: string, t?: "success" | "error") => void }) {
-  const [channel, setChannel] = useState<"sms" | "whatsapp">("sms");
+  const [method, setMethod] = useState<"sms" | "wp">("sms");
   const [phoneNumber, setPhoneNumber] = useState("");
-  const [whatsappNumber, setWhatsappNumber] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     supabase
       .from("client_profiles")
-      .select("messaging_channel, phone_number, whatsapp_number")
+      .select("communication_method, phone_number")
       .eq("user_id", userId)
       .single()
       .then(({ data }) => {
         if (data) {
-          setChannel((data.messaging_channel as "sms" | "whatsapp") || "sms");
+          setMethod((data.communication_method as "sms" | "wp") || "sms");
           setPhoneNumber(data.phone_number || "");
-          setWhatsappNumber(data.whatsapp_number || "");
         }
         setLoading(false);
       });
@@ -358,24 +355,19 @@ function MessagingSection({ userId, toast }: { userId: string; toast: (m: string
     const { error } = await supabase
       .from("client_profiles")
       .upsert(
-        {
-          user_id: userId,
-          messaging_channel: channel,
-          phone_number: channel === "sms" ? phoneNumber : undefined,
-          whatsapp_number: channel === "whatsapp" ? whatsappNumber : undefined,
-        },
+        { user_id: userId, communication_method: method, phone_number: phoneNumber },
         { onConflict: "user_id" }
       );
     setSaving(false);
     if (error) toast("Failed to save", "error");
-    else toast("Messaging channel saved");
+    else toast("Messaging preference saved");
   };
 
-  const channelCard = (type: "sms" | "whatsapp", icon: string, label: string, subtext: string) => {
-    const active = channel === type;
+  const channelCard = (type: "sms" | "wp", icon: string, label: string, subtext: string) => {
+    const active = method === type;
     return (
       <div
-        onClick={() => setChannel(type)}
+        onClick={() => setMethod(type)}
         style={{
           flex: 1,
           background: active ? "rgba(79,70,229,0.1)" : "#1a1a1a",
@@ -400,29 +392,17 @@ function MessagingSection({ userId, toast }: { userId: string; toast: (m: string
     <Card>
       <SectionHeading title="How Dodo reaches you" subtitle="Choose how Dodo sends you messages outside the web portal." />
       <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
-        {channelCard("sms", "💬", "SMS", "Via text message (US numbers)")}
-        {channelCard("whatsapp", "📱", "WhatsApp", "Works globally")}
+        {channelCard("sms", "💬", "SMS", "Via text message")}
+        {channelCard("wp", "🟢", "WhatsApp", "Works globally")}
       </div>
-      {channel === "sms" && (
-        <Field label="Your phone number">
-          <input
-            style={{ ...inputStyle, maxWidth: 320 }}
-            value={phoneNumber}
-            onChange={(e) => setPhoneNumber(e.target.value)}
-            placeholder="+1 (555) 000-0000"
-          />
-        </Field>
-      )}
-      {channel === "whatsapp" && (
-        <Field label="Your WhatsApp number">
-          <input
-            style={{ ...inputStyle, maxWidth: 320 }}
-            value={whatsappNumber}
-            onChange={(e) => setWhatsappNumber(e.target.value)}
-            placeholder="+20 100 000 0000"
-          />
-        </Field>
-      )}
+      <Field label={method === "wp" ? "Your WhatsApp number" : "Your phone number"}>
+        <input
+          style={{ ...inputStyle, maxWidth: 320 }}
+          value={phoneNumber}
+          onChange={(e) => setPhoneNumber(e.target.value)}
+          placeholder={method === "wp" ? "+20 100 000 0000" : "+1 (555) 000-0000"}
+        />
+      </Field>
       <div style={{ marginTop: 20 }}>
         <Btn onClick={save} loading={saving}>Save</Btn>
       </div>
@@ -481,12 +461,11 @@ function IntegrationsSection({ userId, toast }: { userId: string; toast: (m: str
   };
 
   const connect = (key: string, label: string) => {
-    // OAuth connect — open the OAuth flow URL if configured, else show coming soon
     const oauthUrl = (import.meta.env as Record<string, string>)[`VITE_OAUTH_${key.toUpperCase()}_URL`];
     if (oauthUrl) {
       window.open(oauthUrl, "_blank");
     } else {
-      toast(`${label} OAuth coming soon — ask your EG23 team to connect it.`, "error");
+      toast(`${label}: OAuth flow coming soon — ask your EG23 team to connect it.`, "error");
     }
   };
 

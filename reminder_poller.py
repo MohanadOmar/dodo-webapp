@@ -1,8 +1,8 @@
 """Reminder poller + Nightly to-do prompt.
 
 - Checks Supabase every 60s for due reminders
-- If reminder has a user_id → sends to that client's phone (from client_profiles)
-- If reminder has no user_id → sends to Mohanad (personal SMS Dodo)
+- If reminder has a user_id → sends to that client via messaging.send_message (respects communication_method)
+- If reminder has no user_id → sends to Mohanad (personal SMS)
 - At 10pm Chicago time, sends Mohanad's nightly to-do prompt
 """
 import asyncio
@@ -10,7 +10,8 @@ import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from tools import get_supabase, send_sms, send_sms_to_mohanad, send_whatsapp, MOHANAD_PHONE
+from tools import get_supabase, send_sms_to_mohanad, MOHANAD_PHONE
+from messaging import send_message
 from agent import run_agent
 from system_prompts import get_sms_system_prompt
 
@@ -46,34 +47,8 @@ async def start_reminder_poller():
 
                 try:
                     if user_id:
-                        # Client reminder — respect their preferred messaging channel
-                        profile_res = (
-                            get_supabase()
-                            .table("client_profiles")
-                            .select("messaging_channel, phone_number, whatsapp_number")
-                            .eq("user_id", user_id)
-                            .limit(1)
-                            .execute()
-                        )
-                        if profile_res.data:
-                            profile = profile_res.data[0]
-                            channel = profile.get("messaging_channel") or "sms"
-                            if channel == "whatsapp":
-                                wa_number = profile.get("whatsapp_number")
-                                if wa_number:
-                                    send_whatsapp(to=wa_number, message=f"Reminder: {msg}")
-                                else:
-                                    print(f"[Reminder] No WhatsApp number for user {user_id}, skipping")
-                            else:
-                                phone = profile.get("phone_number")
-                                if phone:
-                                    send_sms(to=phone, message=f"Reminder: {msg}")
-                                else:
-                                    print(f"[Reminder] No phone for user {user_id}, skipping")
-                        else:
-                            print(f"[Reminder] No profile for user {user_id}, skipping")
+                        send_message(user_id=user_id, body=f"Reminder: {msg}")
                     else:
-                        # Personal — Mohanad always via SMS
                         send_sms_to_mohanad(f"Reminder: {msg}")
 
                     supabase.table("reminders").update({"sent": True}).eq("id", rid).execute()
@@ -103,7 +78,7 @@ async def start_reminder_poller():
                         user_message=nightly_instruction,
                         system_prompt=get_sms_system_prompt(),
                         phone_number=MOHANAD_PHONE,
-                        user_id=None,  # always Mohanad's personal Dodo
+                        user_id=None,
                     )
                     print(f"[Nightly] Reply: {reply}")
                     if reply and "send_sms" not in str(reply).lower():
