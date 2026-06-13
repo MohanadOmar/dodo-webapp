@@ -10,3 +10,4 @@ twilio==9.3.7
 supabase==2.10.0
 python-multipart==0.0.12
 requests==2.32.3
+pypdf>=4.0.0
