@@ -71,9 +71,23 @@ def get_client_profile(user_id: str) -> dict | None:
     return None
 
 
+def normalize_phone(number: str, for_whatsapp: bool = False) -> str:
+    """Normalize any phone number to the correct format.
+    WhatsApp (Whapi): digits only, no plus sign — e.g. 12107219295
+    SMS (Twilio): digits with leading plus — e.g. +12107219295
+    Strips all spaces, dashes, parentheses, plus signs, dots automatically.
+    """
+    digits = "".join(c for c in number if c.isdigit())
+    if for_whatsapp:
+        return digits
+    else:
+        return f"+{digits}"
+
+
 def send_message_via_wp(to: str, body: str) -> dict:
     """Send a WhatsApp message via Whapi to any number."""
     import requests as req
+    to = normalize_phone(to, for_whatsapp=True)
     url = "https://gate.whapi.cloud/messages/text"
     headers = {
         "accept": "application/json",
@@ -403,6 +417,7 @@ def create_notion_task(title: str, user_id: str = None) -> dict:
 # ─── SMS ──────────────────────────────────────────────────────────────────────
 
 def send_sms(to: str, message: str) -> dict:
+    to = normalize_phone(to, for_whatsapp=False)
     client = get_twilio()
     msg = client.messages.create(from_=TWILIO_FROM, to=to, body=message)
     return {"sid": msg.sid}
