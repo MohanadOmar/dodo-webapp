@@ -12,8 +12,6 @@ from twilio.rest import Client as TwilioClient
 from supabase import create_client
 from openai import OpenAI
 
-import messaging as _messaging
-
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 NOTION_DATABASE_ID = "17e3ff1d-c591-458f-9bf5-fb6d3448e130"
@@ -60,6 +58,31 @@ def get_client_phone(user_id: str) -> str | None:
     except Exception:
         pass
     return None
+
+
+def get_client_profile(user_id: str) -> dict | None:
+    """Get full client profile including communication_method and phone_number."""
+    try:
+        result = get_supabase().table("client_profiles").select("phone_number, communication_method").eq("user_id", user_id).limit(1).execute()
+        if result.data:
+            return result.data[0]
+    except Exception:
+        pass
+    return None
+
+
+def send_message_via_wp(to: str, body: str) -> dict:
+    """Send a WhatsApp message via Whapi to any number."""
+    import requests as req
+    url = "https://gate.whapi.cloud/messages/text"
+    headers = {
+        "accept": "application/json",
+        "authorization": f"Bearer {os.environ.get('WHAPI_API_KEY', '')}",
+        "content-type": "application/json"
+    }
+    data = {"to": to, "body": body}
+    response = req.post(url, headers=headers, json=data)
+    return response.json()
 
 
 def get_client_timezone(user_id: str) -> str:
@@ -391,11 +414,34 @@ def send_sms_to_mohanad(message: str) -> dict:
 
 
 def send_message_to_client(message: str, user_id: str) -> dict:
-    """Send a message to a client via their preferred channel (SMS or WhatsApp). Checks their profile automatically."""
-    return _messaging.send_message(user_id=user_id, body=message)
+    """Send a message to the current client via their preferred channel (SMS or WhatsApp).
+    Checks communication_method in client_profiles: 'wp' = WhatsApp, 'sms' = SMS."""
+    profile = get_client_profile(user_id)
+    if not profile:
+        return {"error": "No profile found for this client."}
+    phone = profile.get("phone_number")
+    if not phone:
+        return {"error": "No phone number on file for this client. They need to add it in their profile."}
+    method = profile.get("communication_method", "sms")
+    if method == "wp":
+        return send_message_via_wp(to=phone, body=message)
+    else:
+        return send_sms(to=phone, message=message)
 
 
-send_message = send_message_to_client
+def send_message(to: str, message: str, user_id: str = None) -> dict:
+    """Send a message to ANY phone number via the user's preferred channel.
+    Use this when Dodo needs to text/WhatsApp a third party (not the client themselves).
+    Checks communication_method from the user's profile: 'wp' = WhatsApp, 'sms' = SMS."""
+    method = "sms"
+    if user_id:
+        profile = get_client_profile(user_id)
+        if profile:
+            method = profile.get("communication_method", "sms")
+    if method == "wp":
+        return send_message_via_wp(to=to, body=message)
+    else:
+        return send_sms(to=to, message=message)
 
 
 # ─── Knowledge Base (per-client) ──────────────────────────────────────────────
