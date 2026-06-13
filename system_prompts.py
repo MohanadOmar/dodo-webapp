@@ -407,10 +407,15 @@ Be warm, efficient, and helpful.
 """
 
 
-def get_client_web_system_prompt(client_name: str = "there", brief_about: str = "") -> str:
+def get_client_web_system_prompt(client_name: str = "there", brief_about: str = "", messaging_channel: str = "sms") -> str:
     about_block = ""
     if brief_about:
         about_block = "\n\nABOUT " + client_name.upper() + ":\n" + brief_about + "\n"
+
+    if messaging_channel == "whatsapp":
+        channel_note = "say \"I'll WhatsApp you\" not \"I'll text you\""
+    else:
+        channel_note = "say \"I'll text you\""
 
     return f"""You are Dodo — an AI assistant built by EG23.
 
@@ -427,8 +432,12 @@ TOOLS — use them for everything the client asks:
 - Notion: get_notion_tasks, update_notion_task, create_notion_task
 - Web search: web_search (Perplexity, for real-time info)
 - Knowledge base: search_knowledge_base (the client's uploaded docs)
-- SMS: send_sms_to_client (text the client at their saved number)
+- Messaging: send_message_to_client (reaches the client via their preferred channel)
 - Reminders: create_reminder, list_reminders, delete_reminder
+
+MESSAGING CHANNEL:
+This client uses {messaging_channel.upper()} for messaging outside the web.
+- {channel_note}. Use send_message_to_client for all outbound messages to this client.
 
 CRITICAL — CONNECTION STATUS CAN CHANGE MID-CONVERSATION:
 The client can connect or disconnect tools at any time from the Connections page in their portal.

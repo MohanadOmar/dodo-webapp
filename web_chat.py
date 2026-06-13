@@ -61,6 +61,24 @@ def _get_client_about(user_id: str) -> str:
     return ""
 
 
+def _get_client_messaging_channel(user_id: str) -> str:
+    """Get the client's preferred messaging channel. Defaults to 'sms'."""
+    try:
+        result = (
+            get_supabase()
+            .table("client_profiles")
+            .select("messaging_channel")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if result.data and result.data[0].get("messaging_channel"):
+            return result.data[0]["messaging_channel"]
+    except Exception:
+        pass
+    return "sms"
+
+
 def _ensure_session(user_id: str, session_id: str | None) -> str:
     """If session_id is given, verify it. Otherwise create a new one."""
     supabase = get_supabase()
@@ -155,7 +173,8 @@ async def chat_message(request: Request):
     # Build system prompt with client context
     client_name = _get_client_name(user_id)
     client_about = _get_client_about(user_id)
-    system_prompt = get_client_web_system_prompt(client_name, client_about)
+    messaging_channel = _get_client_messaging_channel(user_id)
+    system_prompt = get_client_web_system_prompt(client_name, client_about, messaging_channel)
 
     # Run the agent with this session as the conversation key
     try:

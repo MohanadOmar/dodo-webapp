@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from tools import get_supabase, send_sms, send_sms_to_mohanad, get_client_phone, MOHANAD_PHONE
+from tools import get_supabase, send_sms, send_sms_to_mohanad, send_whatsapp, MOHANAD_PHONE
 from agent import run_agent
 from system_prompts import get_sms_system_prompt
 
@@ -46,14 +46,34 @@ async def start_reminder_poller():
 
                 try:
                     if user_id:
-                        # Client reminder — look up their phone
-                        phone = get_client_phone(user_id)
-                        if phone:
-                            send_sms(to=phone, message=f"Reminder: {msg}")
+                        # Client reminder — respect their preferred messaging channel
+                        profile_res = (
+                            get_supabase()
+                            .table("client_profiles")
+                            .select("messaging_channel, phone_number, whatsapp_number")
+                            .eq("user_id", user_id)
+                            .limit(1)
+                            .execute()
+                        )
+                        if profile_res.data:
+                            profile = profile_res.data[0]
+                            channel = profile.get("messaging_channel") or "sms"
+                            if channel == "whatsapp":
+                                wa_number = profile.get("whatsapp_number")
+                                if wa_number:
+                                    send_whatsapp(to=wa_number, message=f"Reminder: {msg}")
+                                else:
+                                    print(f"[Reminder] No WhatsApp number for user {user_id}, skipping")
+                            else:
+                                phone = profile.get("phone_number")
+                                if phone:
+                                    send_sms(to=phone, message=f"Reminder: {msg}")
+                                else:
+                                    print(f"[Reminder] No phone for user {user_id}, skipping")
                         else:
-                            print(f"[Reminder] No phone for user {user_id}, skipping")
+                            print(f"[Reminder] No profile for user {user_id}, skipping")
                     else:
-                        # Personal — Mohanad
+                        # Personal — Mohanad always via SMS
                         send_sms_to_mohanad(f"Reminder: {msg}")
 
                     supabase.table("reminders").update({"sent": True}).eq("id", rid).execute()

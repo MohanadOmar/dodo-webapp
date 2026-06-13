@@ -396,6 +396,47 @@ def send_sms_to_client(message: str, user_id: str) -> dict:
     return send_sms(to=phone, message=message)
 
 
+def send_whatsapp(to: str, message: str) -> dict:
+    """Send a WhatsApp message via Whapi."""
+    api_key = os.environ.get("WHAPI_API_KEY", "")
+    phone = to.replace("@s.whatsapp.net", "").replace("@c.us", "").lstrip("+")
+    _requests.post(
+        "https://gate.whapi.cloud/messages/text",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"to": f"{phone}@s.whatsapp.net", "body": message},
+        timeout=15,
+    )
+    return {"success": True, "to": to}
+
+
+def send_message_to_client(message: str, user_id: str) -> dict:
+    """Send a message to a client via their preferred channel (SMS or WhatsApp)."""
+    supabase = get_supabase()
+    result = (
+        supabase.table("client_profiles")
+        .select("messaging_channel, phone_number, whatsapp_number")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return {"error": "No profile found for this client."}
+
+    profile = result.data[0]
+    channel = profile.get("messaging_channel") or "sms"
+
+    if channel == "whatsapp":
+        wa_number = profile.get("whatsapp_number")
+        if not wa_number:
+            return {"error": "No WhatsApp number on file for this client."}
+        return send_whatsapp(to=wa_number, message=message)
+    else:
+        phone = profile.get("phone_number")
+        if not phone:
+            return {"error": "No phone number on file for this client."}
+        return send_sms(to=phone, message=message)
+
+
 # ─── Knowledge Base (per-client) ──────────────────────────────────────────────
 
 def search_knowledge_base(query: str, user_id: str = None) -> list:

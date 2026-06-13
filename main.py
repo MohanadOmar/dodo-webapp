@@ -9,6 +9,7 @@ from n8n_webhook import router as n8n_router
 from retell_ws import router as retell_router
 from web_chat import router as chat_router
 from knowledge_upload import router as knowledge_router
+from whatsapp import router as whatsapp_router
 from gmail_poller import start_poller
 from reminder_poller import start_reminder_poller
 
@@ -38,6 +39,7 @@ app.include_router(n8n_router, prefix="/n8n")
 app.include_router(retell_router)
 app.include_router(chat_router, prefix="/chat")
 app.include_router(knowledge_router, prefix="/knowledge")
+app.include_router(whatsapp_router, prefix="/whatsapp")
 
 
 @app.get("/health")
